@@ -227,36 +227,3 @@ Resources:
           FromPort: 5432          # PostgreSQLのデフォルトポート
           ToPort: 5432
           SourceSecurityGroupId: !Ref EcsSG   # 「EcsSGが付いているものからだけ」許可
-
-# ============================================================
-# Outputs
-# 他のCloudFormationスタック(ECSやRDSを定義する別テンプレートなど)から
-# !ImportValue でこの値を参照できるようにexportしておく。
-# 例: ECS用テンプレート側で !ImportValue revival-bookstore-dev-private-subnets
-#     と書けば、ここで作ったプライベートサブネットのIDを再利用できる。
-# ============================================================
-Outputs:
-  VpcId:
-    Value: !Ref VPC
-    Export:
-      Name: !Sub "${ProjectName}-${Environment}-vpc-id"
-  PublicSubnets:
-    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
-    Export:
-      Name: !Sub "${ProjectName}-${Environment}-public-subnets"
-  PrivateSubnets:
-    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
-    Export:
-      Name: !Sub "${ProjectName}-${Environment}-private-subnets"
-  AlbSGId:
-    Value: !Ref AlbSG
-    Export:
-      Name: !Sub "${ProjectName}-${Environment}-alb-sg"
-  EcsSGId:
-    Value: !Ref EcsSG
-    Export:
-      Name: !Sub "${ProjectName}-${Environment}-ecs-sg"
-  RdsSGId:
-    Value: !Ref RdsSG
-    Export:
-      Name: !Sub "${ProjectName}-${Environment}-rds-sg"
