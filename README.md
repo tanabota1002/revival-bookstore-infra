@@ -73,15 +73,27 @@ aws cloudformation deploy \
 | `AWS::ECS::Cluster` | `EcsCluster` | Fargateタスクをまとめる論理的な箱。 |
 | `AWS::Logs::LogGroup` | `EcsLogGroup` | コンテナの標準出力/標準エラーを送るCloudWatch Logsのロググループ。 |
 | `AWS::IAM::Role` | `EcsTaskExecutionRole` | ECSがECRからイメージを取得したりCloudWatch Logsに書き込んだりするための実行用ロール（アプリ自体の権限とは別）。 |
-| `AWS::ECS::TaskDefinition` | `TaskDefinition` | どのイメージを・どのCPU/メモリで・どんな環境変数で動かすかの設計図。DB接続情報(`DB_HOST`等)はここでRDSの情報から自動的に渡している。 |
+| `AWS::IAM::Role` | `EcsTaskRole` | **アプリのコード自身**がAWS SDK経由でS3にアクセスするための権限。ExecutionRoleとは役割が違う点に注意（下記コラム参照）。 |
+| `AWS::ECS::TaskDefinition` | `TaskDefinition` | どのイメージを・どのCPU/メモリで・どんな環境変数で動かすかの設計図。DB接続情報(`DB_HOST`等)・S3バケット名(`S3_BUCKET_NAME`)はここで自動的に渡している。 |
 | `AWS::ECS::Service` | `EcsService` | TaskDefinitionの内容で常に`DesiredCount`個のタスクを維持し、落ちたら自動復旧、ALBへの登録・解除も面倒を見る。プライベートサブネットに配置。 |
 
-### データ層（RDS）
+### データ層（RDS / S3）
 
 | Type（タグ） | このテンプレートでの論理ID | 何を作るか |
 |---|---|---|
 | `AWS::RDS::DBSubnetGroup` | `DBSubnetGroup` | RDSをどのサブネット(プライベート×2)に置くかのグループ定義。 |
 | `AWS::RDS::DBInstance` | `RdsInstance` | PostgreSQL本体。`RdsSG`によりECSタスクからの5432番以外は受け付けない。`DeletionPolicy: Snapshot`によりスタック削除時も誤ってデータが消えないようにしている。 |
+| `AWS::S3::Bucket` | `BookImagesBucket` | 本の表紙画像の保存先。非公開バケット（`PublicAccessBlockConfiguration`で全ブロック）+ 暗号化 + バージョニング有効。`DeletionPolicy: Retain`でスタック削除時もバケットは残す。 |
+
+#### ExecutionRole と TaskRole の違い（混同しやすいポイント）
+
+| | ExecutionRole | TaskRole |
+|---|---|---|
+| 誰が使うか | ECSのしくみ自体（コンテナが起動する前段階） | 起動後のアプリのコード自身 |
+| 何に使うか | ECRからイメージをpull、CloudWatch Logsへの書き込み | S3・DynamoDB・SQSなど、アプリがAWS APIを呼ぶとき全般 |
+| このテンプレートでの中身 | `AmazonECSTaskExecutionRolePolicy` | S3バケット(`BookImagesBucket`)への`GetObject`/`PutObject`/`DeleteObject`/`ListBucket` |
+
+アプリ側でS3にアクセスするコードを書くとき、アクセスキーやシークレットキーを一切書かなくていいのはこのTaskRoleのおかげ。AWS SDKが自動的にECSのメタデータエンドポイントから一時credentialを取得する。
 
 ### セキュリティグループの許可関係（一本道になっている）
 

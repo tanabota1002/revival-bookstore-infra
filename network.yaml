@@ -323,6 +323,8 @@ Resources:
 
   # ECSがタスク起動時に「ECRからイメージを取ってくる」「CloudWatch Logsに書き込む」
   # ために代わりに使う権限(IAMロール)。アプリ自体の権限ではなく、ECSの裏方作業用。
+  # ※ TaskRole(次項)とは別物。ExecutionRoleは「ECSがタスクを起動するための権限」、
+  #   TaskRoleは「起動したあとアプリのコード自身が使う権限」で役割が違う。
   EcsTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -336,6 +338,38 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # アプリ(RevivalBookStoreNeo)自身がAWS SDK経由でS3にアクセスする時に使う権限。
+  # コード側にアクセスキー/シークレットキーを書く必要は一切ない。
+  # ECSがこのロールの一時的な認証情報をタスクに自動で配布してくれるので、
+  # AWS SDKのデフォルトの認証情報プロバイダ(DefaultCredentialsProvider)が
+  # 自動的にこれを拾って使う。
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-ecs-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BookImagesBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${BookImagesBucket.Arn}/*"   # バケットの中身(オブジェクト)への操作
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt BookImagesBucket.Arn        # バケット自体の一覧取得
 
   # ============================================================
   # タスク定義
@@ -353,6 +387,7 @@ Resources:
       RequiresCompatibilities:
         - FARGATE
       ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn   # アプリのコードが使うS3アクセス権限はこちら
       ContainerDefinitions:
         - Name: app
           Image: !Ref ContainerImage
@@ -369,6 +404,10 @@ Resources:
               Value: !Ref DBUsername
             - Name: DB_PASSWORD
               Value: !Ref DBPassword
+            - Name: S3_BUCKET_NAME
+              Value: !Ref BookImagesBucket
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -434,3 +473,26 @@ Resources:
         - !Ref RdsSG
       PubliclyAccessible: false   # インターネットから直接繋げない(ECS経由のみ)
       MultiAZ: false              # 開発用は単一AZ。本番で可用性を上げるならtrueにする
+
+  # ============================================================
+  # S3バケット (本の表紙画像の保存先)
+  # バケット名はグローバルで一意にする必要があるため、AWSアカウントIDを末尾に付けている。
+  # 誰でも読めるようにはせず(BlockPublicAccessを全部true)、非公開バケットとして作る。
+  # アプリからは署名付きURL(presigned URL)を発行して一時的にアクセスさせる方式を想定。
+  # ============================================================
+  BookImagesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain   # スタック削除時にバケットごと画像が消えるのを防ぐ(空でないと削除もできない)
+    Properties:
+      BucketName: !Sub "${ProjectName}-${Environment}-book-images-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256   # 保存時に自動暗号化
+      VersioningConfiguration:
+        Status: Enabled   # 誤って上書き/削除しても古い画像を復元できるようにする
