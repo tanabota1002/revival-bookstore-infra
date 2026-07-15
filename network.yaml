@@ -1,6 +1,17 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "Network layer (VPC, Subnets, SG) for RevivalBookStoreNeo"
 
+# このテンプレートが作るもの:
+#   VPC 1個
+#   ├─ パブリックサブネット ×2 (AZ分散) ← ALBが住む
+#   ├─ プライベートサブネット ×2       ← ECS(アプリ)とRDSが住む
+#   ├─ IGW + NATゲートウェイ
+#   └─ セキュリティグループ ×3 (ALB / ECS / RDS)
+#
+# 「パブリック/プライベート」の違いはルートテーブルだけで決まる。
+#   パブリックサブネット = インターネットゲートウェイ(IGW)への経路を持つ
+#   プライベートサブネット = NATゲートウェイ経由でしか外に出られない(直接インターネットからは入れない)
+
 Parameters:
   ProjectName:
     Type: String
@@ -11,25 +22,35 @@ Parameters:
     Default: dev
 
 Resources:
-  # ---------- VPC ----------
+  # ============================================================
+  # VPC本体
+  # AWS上に作る「自分専用の仮想ネットワーク」の箱。
+  # 10.0.0.0/16 = 10.0.0.0 ～ 10.0.255.255 の約6万5千個のIPアドレスを持てる範囲。
+  # この中を後でサブネット(/24など)に切り分けて使う。
+  # ============================================================
   VPC:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
+      EnableDnsSupport: true    # VPC内でAWSのDNS解決を使えるようにする
+      EnableDnsHostnames: true  # EC2などにパブリックDNS名を自動で割り当てる
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-${Environment}-vpc"
 
-  # ---------- パブリックサブネット (ALB用) ----------
+  # ============================================================
+  # パブリックサブネット (ALBを置く場所)
+  # 「パブリック」なのは後述のPublicRouteTableでIGWに繋がっているから。
+  # AZ(アベイラビリティゾーン)を2つに分けるのは、片方のデータセンターが
+  # 落ちてももう片方で動き続けられるようにするため(冗長化)。
+  # ============================================================
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.0.0.0/24
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.0.0/24         # 10.0.0.0 ～ 10.0.0.255 (256個)
+      AvailabilityZone: !Select [0, !GetAZs ""]  # そのリージョンの1つ目のAZを自動選択
+      MapPublicIpOnLaunch: true      # ここに置いたインスタンスに自動でパブリックIPを付与
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-${Environment}-public-1"
@@ -39,13 +60,18 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
-      AvailabilityZone: !Select [1, !GetAZs ""]
+      AvailabilityZone: !Select [1, !GetAZs ""]  # 2つ目のAZ(PublicSubnet1とは別の場所)
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-${Environment}-public-2"
 
-  # ---------- プライベートサブネット (ECS/RDS用) ----------
+  # ============================================================
+  # プライベートサブネット (ECS/アプリ・RDSを置く場所)
+  # IGWへの経路を持たないので、インターネットから直接アクセスできない。
+  # 外向きの通信(ライブラリのダウンロード等)はNATゲートウェイ経由で行う。
+  # ここにDBやアプリ本体を置くことで、外部から直接叩かれるリスクを減らす。
+  # ============================================================
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -66,7 +92,11 @@ Resources:
         - Key: Name
           Value: !Sub "${ProjectName}-${Environment}-private-2"
 
-  # ---------- インターネットゲートウェイ ----------
+  # ============================================================
+  # インターネットゲートウェイ (IGW)
+  # VPCとインターネットの間の「玄関口」。これ自体はVPCの外に浮いている部品で、
+  # AttachGatewayでVPCにくっつけて初めて使えるようになる。
+  # ============================================================
   InternetGateway:
     Type: AWS::EC2::InternetGateway
 
@@ -76,7 +106,15 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # ---------- NATゲートウェイ (コスト節約で1台) ----------
+  # ============================================================
+  # NATゲートウェイ
+  # プライベートサブネット(ECS/RDS)から外(インターネット)へ一方通行で
+  # 出ていくための中継地点。「外からは来れないが、中からは出られる」を実現する。
+  # NAT自体はパブリックサブネットに置く必要がある(玄関=IGWに直接繋がる場所にいないと
+  # 外に出られないため)。EIPは固定のパブリックIPアドレス。
+  # 今回はコスト節約のため1台だけ(=そのAZが落ちるとプライベート側の外向き通信も止まる)。
+  # 本番で可用性を上げたい場合はAZごとに1台ずつ(2台)にする。
+  # ============================================================
   NatEip:
     Type: AWS::EC2::EIP
     Properties:
@@ -86,9 +124,15 @@ Resources:
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NatEip.AllocationId
-      SubnetId: !Ref PublicSubnet1
+      SubnetId: !Ref PublicSubnet1   # パブリックサブネットに置く
 
-  # ---------- ルートテーブル ----------
+  # ============================================================
+  # ルートテーブル
+  # 「このサブネットから0.0.0.0/0(=どこでも)宛の通信は、どこ経由で送るか」を決める表。
+  # サブネットが「パブリックかプライベートか」は、この経路の中身で決まる。
+  # ============================================================
+
+  # --- パブリック用: 0.0.0.0/0 → IGW ---
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -96,12 +140,13 @@ Resources:
 
   PublicRoute:
     Type: AWS::EC2::Route
-    DependsOn: AttachGateway
+    DependsOn: AttachGateway   # IGWがVPCに接続完了してからルートを作る必要がある
     Properties:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
+  # パブリックサブネット2つに、上のルートテーブルを紐付ける
   PublicSubnet1RouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -114,6 +159,7 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
+  # --- プライベート用: 0.0.0.0/0 → NATゲートウェイ ---
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -126,6 +172,7 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGateway
 
+  # プライベートサブネット2つに、上のルートテーブルを紐付ける
   PrivateSubnet1RouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -138,7 +185,14 @@ Resources:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable
 
-  # ---------- セキュリティグループ ----------
+  # ============================================================
+  # セキュリティグループ (SG)
+  # インスタンス単位のファイアウォール。「誰からの通信を許可するか」を定義する。
+  # ここでは ALB ← ECS ← RDS という一本道の通信だけを許可し、
+  # 各層は「一つ内側のSGからしか話しかけられない」ようにしている(多層防御)。
+  # ============================================================
+
+  # ALB: インターネットから直接HTTPを受け付ける唯一の入口
   AlbSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -148,8 +202,9 @@ Resources:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
+          CidrIp: 0.0.0.0/0   # 誰からでもOK (インターネット全体)
 
+  # ECS: ALBからの通信だけ受け付ける(インターネットから直接は叩けない)
   EcsSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -157,10 +212,11 @@ Resources:
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 8080
+          FromPort: 8080          # アプリのコンテナが待ち受けるポート
           ToPort: 8080
-          SourceSecurityGroupId: !Ref AlbSG
+          SourceSecurityGroupId: !Ref AlbSG   # IPではなく「AlbSGが付いているものからだけ」許可
 
+  # RDS: ECSからの通信だけ受け付ける(ECS以外は誰も繋げない)
   RdsSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -168,10 +224,17 @@ Resources:
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 5432
+          FromPort: 5432          # PostgreSQLのデフォルトポート
           ToPort: 5432
-          SourceSecurityGroupId: !Ref EcsSG
+          SourceSecurityGroupId: !Ref EcsSG   # 「EcsSGが付いているものからだけ」許可
 
+# ============================================================
+# Outputs
+# 他のCloudFormationスタック(ECSやRDSを定義する別テンプレートなど)から
+# !ImportValue でこの値を参照できるようにexportしておく。
+# 例: ECS用テンプレート側で !ImportValue revival-bookstore-dev-private-subnets
+#     と書けば、ここで作ったプライベートサブネットのIDを再利用できる。
+# ============================================================
 Outputs:
   VpcId:
     Value: !Ref VPC
