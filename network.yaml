@@ -1,16 +1,22 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Network layer (VPC, Subnets, SG) for RevivalBookStoreNeo"
+Description: "Network + ECS/ALB/RDS layer for RevivalBookStoreNeo (single stack)"
 
 # このテンプレートが作るもの:
 #   VPC 1個
 #   ├─ パブリックサブネット ×2 (AZ分散) ← ALBが住む
 #   ├─ プライベートサブネット ×2       ← ECS(アプリ)とRDSが住む
 #   ├─ IGW + NATゲートウェイ
-#   └─ セキュリティグループ ×3 (ALB / ECS / RDS)
+#   ├─ セキュリティグループ ×3 (ALB / ECS / RDS)
+#   ├─ ALB + ターゲットグループ + リスナー (80番で受けてECSに転送)
+#   ├─ ECSクラスタ + Fargateタスク定義 + ECSサービス (アプリ本体)
+#   └─ RDS(PostgreSQL) + DBサブネットグループ
 #
 # 「パブリック/プライベート」の違いはルートテーブルだけで決まる。
 #   パブリックサブネット = インターネットゲートウェイ(IGW)への経路を持つ
 #   プライベートサブネット = NATゲートウェイ経由でしか外に出られない(直接インターネットからは入れない)
+#
+# ECS/ALB/RDSも同一テンプレートにまとめているので、Outputs/Exportは使わず
+# 全部!Refで直接参照している。
 
 Parameters:
   ProjectName:
@@ -20,6 +26,33 @@ Parameters:
     Type: String
     AllowedValues: [dev, prd]
     Default: dev
+
+  # ---------- ECS関連 ----------
+  ContainerImage:
+    Type: String
+    Description: "ECRのイメージURI (例: 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/revival-bookstore:latest)"
+  ContainerPort:
+    Type: Number
+    Default: 8080   # RevivalBookStoreNeoのSpring Bootアプリが待ち受けるポート
+  DesiredCount:
+    Type: Number
+    Default: 1      # 起動しておくタスク(コンテナ)の数
+
+  # ---------- RDS関連 ----------
+  DBName:
+    Type: String
+    Default: revivalbookstoreneo
+  DBUsername:
+    Type: String
+    Default: postgres
+  DBPassword:
+    Type: String
+    NoEcho: true    # テンプレートのパラメータ入力欄やログにパスワードが表示されないようにする
+    MinLength: 8
+    Description: "RDSのマスターパスワード(8文字以上)。本番では手入力ではなくSecrets Managerの利用を推奨。"
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro   # 開発用の一番小さいインスタンスクラス
 
 Resources:
   # ============================================================
@@ -227,3 +260,177 @@ Resources:
           FromPort: 5432          # PostgreSQLのデフォルトポート
           ToPort: 5432
           SourceSecurityGroupId: !Ref EcsSG   # 「EcsSGが付いているものからだけ」許可
+
+  # ============================================================
+  # ALB (Application Load Balancer)
+  # インターネットからの通信を受け付けて、ECSタスクに振り分ける役目。
+  # パブリックサブネットに配置し、AlbSGで80番だけ開けている。
+  # ============================================================
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-alb"
+      Scheme: internet-facing        # インターネットに公開する
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref AlbSG
+
+  # ALBが転送した先のグループ。ここに実際のECSタスク(コンテナ)が登録される。
+  # TargetType: ip = Fargateではタスクごとに個別IPが振られるため、IPで直接登録する方式にする。
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-tg"
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      TargetType: ip
+      HealthCheckPath: /            # アプリのトップページで死活監視
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  # ALBの80番ポートに来た通信を、上のTargetGroupに転送するルール
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================
+  # ECSクラスタ
+  # Fargateタスクをまとめる論理的な箱。Fargateの場合、裏側のサーバー管理はAWS任せになる。
+  # ============================================================
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-${Environment}-cluster"
+
+  # ECSタスク(コンテナ)の標準出力・標準エラーの送り先。
+  # これが無いとログがどこにも残らず、アプリが落ちた時に原因調査ができなくなる。
+  EcsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}-${Environment}"
+      RetentionInDays: 14
+
+  # ECSがタスク起動時に「ECRからイメージを取ってくる」「CloudWatch Logsに書き込む」
+  # ために代わりに使う権限(IAMロール)。アプリ自体の権限ではなく、ECSの裏方作業用。
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-ecs-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # ============================================================
+  # タスク定義
+  # 「どのイメージを」「どれくらいのCPU/メモリで」「どのポートで」「どんな環境変数で」
+  # 動かすかを書いた設計図。DBの接続情報はRevivalBookStoreNeoのapplication.propertiesが
+  # 見ている DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD をそのまま環境変数で渡している。
+  # ============================================================
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-${Environment}-task"
+      Cpu: "256"                    # 0.25 vCPU (Fargateの最小クラス)
+      Memory: "512"                 # 512MB
+      NetworkMode: awsvpc           # Fargateは必ずawsvpc(タスクごとに専用ENI/IP)
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ContainerImage
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          Environment:
+            - Name: DB_HOST
+              Value: !GetAtt RdsInstance.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt RdsInstance.Endpoint.Port
+            - Name: DB_NAME
+              Value: !Ref DBName
+            - Name: DB_USER
+              Value: !Ref DBUsername
+            - Name: DB_PASSWORD
+              Value: !Ref DBPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+
+  # ============================================================
+  # ECSサービス
+  # 「TaskDefinitionの内容のタスクを、常にDesiredCount個起動し続ける」ことを保証する管理者役。
+  # タスクが落ちたら自動で立て直し、ALBのTargetGroupへの登録・解除も面倒を見る。
+  # プライベートサブネットに置くので、インターネットから直接は繋がらず、ALB経由のみ。
+  # ============================================================
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn: AlbListener   # リスナーができる前にサービスを起動しようとして失敗するのを防ぐ
+    Properties:
+      ServiceName: !Sub "${ProjectName}-${Environment}-service"
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref EcsSG
+          AssignPublicIp: DISABLED   # プライベートサブネットなのでパブリックIPは不要
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================
+  # RDS (PostgreSQL)
+  # プライベートサブネットの2つにまたがるサブネットグループを作り、その中にDBを置く。
+  # RdsSGにより、EcsSGが付いたもの(=ECSタスク)からしか5432番に繋げない。
+  # ============================================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName}-${Environment}-db-subnet-group"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  RdsInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot   # スタック削除時、DBは自動でスナップショットを残してから消す(誤削除対策)
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-${Environment}-db"
+      Engine: postgres
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: "20"
+      StorageType: gp3
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RdsSG
+      PubliclyAccessible: false   # インターネットから直接繋げない(ECS経由のみ)
+      MultiAZ: false              # 開発用は単一AZ。本番で可用性を上げるならtrueにする
