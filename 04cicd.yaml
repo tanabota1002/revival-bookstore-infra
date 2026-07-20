@@ -23,7 +23,13 @@ Resources:
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Sub "${ProjectName}-${Environment}-repo"
-      ImageTagMutability: IMMUTABLE
+      # [修正] IMMUTABLE から MUTABLE に変更。
+      #   CodeBuild が固定タグ "latest" で毎回 push する構成のため、IMMUTABLE のままだと
+      #   2回目以降のビルドで同一タグの上書きが拒否され (ImageTagAlreadyExists) 失敗していた。
+      #   MUTABLE にすることで "latest" の再 push を許可しビルドが通るようにした。
+      #   ※より堅牢にするなら IMMUTABLE を維持しつつ buildspec 側で
+      #     IMAGE_TAG をコミットハッシュ等の一意値にする方法が望ましい (別途 buildspec 修正が必要)。
+      ImageTagMutability: MUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
@@ -43,6 +49,12 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      # [修正] バージョニングを有効化。
+      #   CodePipeline のアーティファクトストアはバージョニング有効が要件で、
+      #   PipelineRole / CodeBuildRole も s3:GetObjectVersion を前提にしている。
+      #   これが無いとパイプライン実行時にアーティファクト取得で失敗し得るため追加した。
+      VersioningConfiguration:
+        Status: Enabled
 
   ArtifactBucketPolicy:
     Type: AWS::S3::BucketPolicy

@@ -113,12 +113,12 @@
 
 ## 対応優先度まとめ
 
-| 優先 | 項目 | ファイル |
-|------|------|----------|
-| 🔴 | ECR IMMUTABLE × `latest` タグ衝突 | 04cicd.yaml |
-| 🔴 | ArtifactBucket のバージョニング欠如 | 04cicd.yaml |
-| 🟠 | CodeCommit 依存（新規アカウント不可） | 04cicd.yaml |
-| 🟠 | RDS MultiAZ ハードコード / 保護・バージョン設定不足 | 02date.yaml |
-| 🟠 | ヘルスチェックパス `/` | 03app.yaml |
-| 🟠 | DesiredCount 0 と MinCapacity 1 の不整合 | 03app.yaml |
-| 🟢 | 絵文字コメント・旧ファイル重複・egress 等 | 全般 |
+| 優先 | 項目 | ファイル | 状態 |
+|------|------|----------|------|
+| 🔴 | ECR IMMUTABLE × `latest` タグ衝突 → MUTABLE に変更 | 04cicd.yaml | ✅ 対応済み |
+| 🔴 | ArtifactBucket のバージョニング欠如 → Enabled 追加 | 04cicd.yaml | ✅ 対応済み |
+| 🟠 | CodeCommit 依存（新規アカウント不可） | 04cicd.yaml | 未対応 |
+| 🟠 | RDS MultiAZ ハードコード / 保護・バージョン設定不足 | 02date.yaml | 未対応 |
+| 🟠 | ヘルスチェックパス `/` | 03app.yaml | 未対応 |
+| 🟠 | DesiredCount 0 と MinCapacity 1 の不整合 | 03app.yaml | 未対応 |
+| 🟢 | 絵文字コメント・旧ファイル重複・egress 等 | 全般 | 未対応 |
