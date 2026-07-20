@@ -227,7 +227,13 @@ Resources:
               Configuration:
                 RepositoryName: !Ref CodeCommitRepository
                 BranchName: main
-                PollForSourceChanges: false
+                # [修正] ブール値 false → 文字列 "false" に変更。
+                #   CodePipeline の Configuration は値をすべて文字列として扱う仕様のため、
+                #   ブール値で渡すと設定が反映されず既定の true(ポーリング有効)に落ち、
+                #   EventBridge トリガーとは別にソースポーリングが動いてしまっていた。
+                #   文字列 "false" にすることでポーリングを無効化し、トリガーを
+                #   下記 PipelineTriggerRule(EventBridge)に一本化する。
+                PollForSourceChanges: "false"
               OutputArtifacts:
                 - Name: SourceOutput
               RunOrder: 1
