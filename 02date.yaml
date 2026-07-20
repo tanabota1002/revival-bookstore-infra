@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "RevivalBookStoreNeo-Data Layer (RDS, S3, Secrets)"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: revival-bookstore
+  Environment:
+    Type: String
+    AllowedValues: [dev, prd]
+    Default: dev
+  DBName:
+    Type: String
+    Default: revivalbookstoreneo
+  DBUsername:
+    Type: String
+    Default: postgres
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+
+Resources:
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-db-password"
+      Description: "Auto-generated password for RDS"
+      GenerateSecretString:
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\ '
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName}-${Environment}-db-subnet-group"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${ProjectName}-${Environment}-PrivateSubnet3Id"
+        - Fn::ImportValue: !Sub "${ProjectName}-${Environment}-PrivateSubnet4Id"
+
+  RdsInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-${Environment}-db"
+      Engine: postgres
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${ProjectName}-${Environment}-db-password:SecretString}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub "${ProjectName}-${Environment}-RdsSgId"
+      PubliclyAccessible: false
+      MultiAZ: true
+
+  BookImagesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-${Environment}-book-images-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+  BookImagesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BookImagesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt BookImagesBucket.Arn
+              - !Sub "${BookImagesBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+Outputs:
+  DBSecretArn:
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-DBSecretArn"
+  RdsEndpointAddress:
+    Value: !GetAtt RdsInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-RdsEndpointAddress"
+  RdsEndpointPort:
+    Value: !GetAtt RdsInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-RdsEndpointPort"
+  ExportedDBName:
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-DBName"
+  ExportedDBUsername:
+    Value: !Ref DBUsername
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-DBUsername"
+  BookImagesBucketName:
+    Value: !Ref BookImagesBucket
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-BookImagesBucketName"
+  BookImagesBucketArn:
+    Value: !GetAtt BookImagesBucket.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-BookImagesBucketArn"
