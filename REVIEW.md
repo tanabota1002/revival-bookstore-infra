@@ -115,7 +115,7 @@
 
 | 優先 | 項目 | ファイル | 状態 |
 |------|------|----------|------|
-| 🔴 | ECR IMMUTABLE × `latest` タグ衝突 → MUTABLE に変更 | 04cicd.yaml | ✅ 対応済み |
+| 🔴 | ECR IMMUTABLE × `latest` タグ衝突 → IMMUTABLE維持＋buildspecでコミットハッシュ一意タグ化 | 04cicd.yaml / buildspec.yml | ✅ 対応済み |
 | 🔴 | ArtifactBucket のバージョニング欠如 → Enabled 追加 | 04cicd.yaml | ✅ 対応済み |
 | 🟠 | CodeCommit 依存（新規アカウント不可） | 04cicd.yaml | 未対応 |
 | 🟠 | RDS MultiAZ ハードコード / 保護・バージョン設定不足 | 02date.yaml | 未対応 |

@@ -23,13 +23,13 @@ Resources:
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Sub "${ProjectName}-${Environment}-repo"
-      # [修正] IMMUTABLE から MUTABLE に変更。
-      #   CodeBuild が固定タグ "latest" で毎回 push する構成のため、IMMUTABLE のままだと
-      #   2回目以降のビルドで同一タグの上書きが拒否され (ImageTagAlreadyExists) 失敗していた。
-      #   MUTABLE にすることで "latest" の再 push を許可しビルドが通るようにした。
-      #   ※より堅牢にするなら IMMUTABLE を維持しつつ buildspec 側で
-      #     IMAGE_TAG をコミットハッシュ等の一意値にする方法が望ましい (別途 buildspec 修正が必要)。
-      ImageTagMutability: MUTABLE
+      # [修正] IMMUTABLE を維持。
+      #   当初 "latest" 固定タグでの再 push が IMMUTABLE と衝突して失敗していたが、
+      #   buildspec.yml 側で IMAGE_TAG をコミットハッシュ(先頭7桁)の一意タグにする対応を実施したため、
+      #   タグ衝突が起きなくなり IMMUTABLE をそのまま使える。
+      #   IMMUTABLE によりイメージの上書きを防ぎ、デプロイの再現性・追跡性を確保する。
+      #   参照: buildspec.yml の COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      ImageTagMutability: IMMUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
@@ -141,8 +141,9 @@ Resources:
             Value: !Ref AWS::AccountId
           - Name: IMAGE_REPO_NAME
             Value: !Ref EcrRepository
-          - Name: IMAGE_TAG
-            Value: "latest"
+          # [修正] IMAGE_TAG の環境変数(固定 "latest")は削除。
+          #   buildspec.yml 側で IMAGE_TAG をコミットハッシュから毎回算出するため、
+          #   ここで "latest" を渡すと未使用かつ誤解の元になる。タグ決定は buildspec に一元化。
 
   # ---------- CodePipeline ----------
   PipelineRole:
